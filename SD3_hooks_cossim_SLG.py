@@ -1,8 +1,11 @@
+import inspect
+
 import torch
-import Image
 import numpy as np
+import types
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
+from PIL import Image
 from torchvision import transforms
 from diffusers import StableDiffusion3Pipeline
 
@@ -178,69 +181,41 @@ def get_features_for_image(pipe, sd3_model, image_path, device="cuda"):
         )
 
 
-def implement_skip_layer_guidance(pipe, input_image_path, output_image_path, skip_layers, device="cuda"):
-    """
-    Implements Skip-Layer Guidance on the Stable Diffusion 3 model.
-    Args:
-        pipe: The Stable Diffusion 3 pipeline.
-        input_image_path: Path to the input image.
-        output_image_path: Path to save the modified image.
-        skip_layers: List of layer indices to apply skip-layer guidance on.
-        device: The device to run the model on (default is "cuda").
-    """
-    # loade and preprocess the input image
-    image = Image.open(input_image_path).convert("RGB")
-    preprocess = transforms.Compose([
-        transforms.Resize((512, 512)),
-        transforms.ToTensor(),
-        transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
-    ])
-    image_tensor = preprocess(image).unsqueeze(0).to(device, dtype=torch.float16)
+def implement_skip_layer_guidance(pipe, text_prompt, skip_layers, device="cuda"):
+    print(f"Skip layers: {skip_layers}")
 
-    with torch.no_grad():
-        latents = pipe.vae.encode(image_tensor).latent_dist.sample() * pipe.vae.config.scaling_factor
+    original_forwards = {}
 
-    # save the original forward method
-    original_forward = pipe.transformer.forward
+    for layer_idx in skip_layers:
+        block = pipe.transformer.transformer_blocks[layer_idx]
+        original_forwards[layer_idx] = block.forward
 
-    # Counter to track the current block
-    current_block = [0]
+        def create_skip_forward(orig_idx):
+            def skip_forward(self, hidden_states, encoder_hidden_states=None, *args, **kwargs):
+                #print(f"Skip layer {orig_idx}")
+                return encoder_hidden_states, hidden_states
 
-    # Custom forward method to apply skip-layer guidance
-    def custom_forward(*args, **kwargs):
-        """Custom forward method to apply skip-layer guidance."""
-        result = original_forward(*args, **kwargs)
+            return skip_forward
 
-        # Check if the current block is in the skip layers
-        if current_block[0] in skip_layers:
-            if isinstance(result, tuple): # Check if the result is a tuple (common in SD3)
-                modified_result = list(result)
-                # do something with the result, e.g., modify the second element
-                # modified_result[1] = modified_result[1] * 0.5  # eg. scale the second element
-                modified_result = tuple(modified_result)
-                return modified_result
-            else:
-                return result  # Fallback
+        block.forward = types.MethodType(create_skip_forward(layer_idx), block)
 
-        current_block[0] += 1
-        return result
-
-    # Set the custom forward method
-    pipe.transformer.forward = custom_forward
-
-    # Generate the modified image with skip-layer guidance
-    # Note: The prompt is not used here, but you can modify it as needed.
+    # Generate the image with the modified layers
+    print(f"Generate image with skipped layers {skip_layers}...")
     modified_image = pipe(
-        prompt="Skip-layer guidance applied",
-        latents=latents,
+        prompt=text_prompt,
+        num_inference_steps=28,
     ).images[0]
 
-    # Restore the original forward method
-    pipe.transformer.forward = original_forward
+    # Restore the original forward functions for the skipped layers
+    for layer_idx, forward_func in original_forwards.items():
+        pipe.transformer.transformer_blocks[layer_idx].forward = forward_func
 
-    # save the modified image
-    modified_image.save(output_image_path)
-    print(f"Modifiziertes Bild gespeichert als {output_image_path}")
+    # Save the modified image
+    modified_image.save("balloon example/text_image_modified.png")
+    print(f"Modified image saved as {"balloon example/text_image_modified.png"}")
+
+    return modified_image
+
 
 
 def main():
@@ -255,22 +230,22 @@ def main():
     sd3_model.eval()
 
     # Prompts with and without text
-    text_image_prompt = "A clear sign that says 'HELLO WORLD' in large bold letters"
-    no_text_image_prompt = "A beautiful landscape with mountains and a lake"
+    text_image_prompt = "A red balloon with the clear text 'Happy Birthday' written on it, floating in a blue sky"
+    no_text_image_prompt = "A red balloon floating in a blue sky"
 
     # generate images based on the prompts
     image_files = generate_images(
         pipe,
         [text_image_prompt, no_text_image_prompt],
-        ["text_image.png", "no_text_image.png"]
+        ["balloon example/text_image.png", "balloon example/no_text_image.png"]
     )
 
     # extract features from the generated images
     print("Extract Features for images with text...")
-    features_text_image = get_features_for_image(pipe, sd3_model, "text_image.png", device)
+    features_text_image = get_features_for_image(pipe, sd3_model, "balloon example/text_image.png", device)
 
     print("Extarct Features for images without text...")
-    features_no_text_image = get_features_for_image(pipe, sd3_model, "no_text_image.png", device)
+    features_no_text_image = get_features_for_image(pipe, sd3_model, "balloon example/no_text_image.png", device)
 
     # calculate cosine similarity between features of images with and without text
     print("Calcuate cosine similarity")
@@ -281,7 +256,7 @@ def main():
     plot_similarities(similarities)
 
     # Save the similarities to a text file
-    with open("text_similarity_analysis.txt", "w") as f:
+    with open("balloon example/text_similarity_analysis.txt", "w") as f:
         f.write("Cosine-Similarity between images with and without text:\n")
         for key, value in sorted(similarities.items(), key=lambda x: int(x[0].split('_')[-1])):
             f.write(f"{key}: {value:.4f}\n")
@@ -297,8 +272,7 @@ def main():
     print("Apply Skip-Layer Guidance on the identified text-processing layers")
     implement_skip_layer_guidance(
         pipe,
-        "text_image.png",
-        "text_image_modified.png",
+        text_image_prompt,
         text_processing_layers,
         device
     )
