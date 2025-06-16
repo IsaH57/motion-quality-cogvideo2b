@@ -216,8 +216,6 @@ def implement_skip_layer_guidance(pipe, text_prompt, skip_layers, device="cuda")
 
     return modified_image
 
-
-
 def main():
     # loade the Stable Diffusion 3 model
     device = "cuda"
